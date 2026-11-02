@@ -22,7 +22,10 @@ def is_valid_token(token: str) -> bool:
 
 def validate_website_id(website_id: str) -> str:
     if WEBSITE_ID_PATTERN.fullmatch(website_id) is None:
-        raise ValueError("Website ID must be 1-100 ASCII letters, numbers, dots, underscores, or hyphens")
+        raise ValueError(
+            "Website ID must be 1-100 ASCII letters, numbers, dots, "
+            "underscores, or hyphens"
+        )
     return website_id
 
 

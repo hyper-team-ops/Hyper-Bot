@@ -41,5 +41,7 @@ class FileRegistry:
 
     def replace_messages(self, website_id: str, message_ids: Sequence[int]) -> FileRecord:
         return self.repository.update_messages(
-            validate_website_id(website_id), validate_message_ids(message_ids), self.source_channel_id
+            validate_website_id(website_id),
+            validate_message_ids(message_ids),
+            self.source_channel_id,
         )

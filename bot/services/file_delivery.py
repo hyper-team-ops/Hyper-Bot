@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 
 from telegram import Bot
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 
 from bot.database.models import FileRecord
 
@@ -35,32 +35,67 @@ class FileDeliveryService:
         self.max_retry_after = max_retry_after
 
     async def deliver(self, bot: Bot, chat_id: int, record: FileRecord) -> DeliveryResult:
-        if len(record.message_ids) > 1 and not record.strip_captions:
+        if not record.active:
+            raise DeliveryError("Inactive file record")
+        return await self.deliver_messages(
+            bot=bot,
+            chat_id=chat_id,
+            source_channel_id=record.source_channel_id,
+            message_ids=record.message_ids,
+            strip_captions=record.strip_captions,
+        )
+
+    async def deliver_messages(
+        self,
+        *,
+        bot: Bot,
+        chat_id: int,
+        source_channel_id: int,
+        message_ids: tuple[int, ...],
+        strip_captions: bool,
+    ) -> DeliveryResult:
+        # Telegram user/private-chat IDs are positive; group and channel IDs are
+        # negative. Keep this invariant here as defense in depth in addition to the
+        # handler's explicit ChatType.PRIVATE check.
+        if chat_id <= 0:
+            raise DeliveryError("File delivery requires a private chat")
+        if not message_ids:
+            raise DeliveryError("File record contains no messages")
+        if len(message_ids) > 1 and not strip_captions:
             try:
-                await self._copy_many_with_retry(
+                copied = await self._copy_many_with_retry(
                     bot,
                     {
                         "chat_id": chat_id,
-                        "from_chat_id": record.source_channel_id,
-                        "message_ids": record.message_ids,
+                        "from_chat_id": source_channel_id,
+                        "message_ids": message_ids,
                     },
                 )
             except (BadRequest, Forbidden) as exc:
                 logger.warning("Telegram refused registered album copy: %s", type(exc).__name__)
                 raise DeliveryError("Source album is unavailable") from exc
-            except (NetworkError, TimedOut, TelegramError) as exc:
+            except TelegramError as exc:
                 logger.warning("Telegram album delivery failed: %s", type(exc).__name__)
                 raise DeliveryError("Telegram album delivery failed") from exc
-            return DeliveryResult(delivered=len(record.message_ids), total=len(record.message_ids))
+            try:
+                copied_count = len(copied)
+            except TypeError as exc:
+                raise DeliveryError("Unexpected Telegram album response") from exc
+            if copied_count != len(message_ids):
+                raise DeliveryError(
+                    "Telegram copied only part of the album",
+                    delivered=min(copied_count, len(message_ids)),
+                )
+            return DeliveryResult(delivered=copied_count, total=len(message_ids))
 
         delivered = 0
-        for message_id in record.message_ids:
+        for message_id in message_ids:
             kwargs: dict[str, object] = {
                 "chat_id": chat_id,
-                "from_chat_id": record.source_channel_id,
+                "from_chat_id": source_channel_id,
                 "message_id": message_id,
             }
-            if record.strip_captions:
+            if strip_captions:
                 kwargs["caption"] = ""
             try:
                 await self._copy_with_retry(bot, kwargs)
@@ -68,10 +103,10 @@ class FileDeliveryService:
             except (BadRequest, Forbidden) as exc:
                 logger.warning("Telegram refused registered message copy: %s", type(exc).__name__)
                 raise DeliveryError("Source message is unavailable", delivered) from exc
-            except (NetworkError, TimedOut, TelegramError) as exc:
+            except TelegramError as exc:
                 logger.warning("Telegram file delivery failed: %s", type(exc).__name__)
                 raise DeliveryError("Telegram delivery failed", delivered) from exc
-        return DeliveryResult(delivered=delivered, total=len(record.message_ids))
+        return DeliveryResult(delivered=delivered, total=len(message_ids))
 
     async def _copy_with_retry(self, bot: Bot, kwargs: dict[str, object]) -> None:
         try:
@@ -87,9 +122,9 @@ class FileDeliveryService:
             await asyncio.sleep(max(1, retry_after))
             await bot.copy_message(**kwargs)
 
-    async def _copy_many_with_retry(self, bot: Bot, kwargs: dict[str, object]) -> None:
+    async def _copy_many_with_retry(self, bot: Bot, kwargs: dict[str, object]) -> object:
         try:
-            await bot.copy_messages(**kwargs)
+            return await bot.copy_messages(**kwargs)
         except RetryAfter as exc:
             retry_after = (
                 int(exc.retry_after.total_seconds())
@@ -99,4 +134,4 @@ class FileDeliveryService:
             if retry_after > self.max_retry_after:
                 raise
             await asyncio.sleep(max(1, retry_after))
-            await bot.copy_messages(**kwargs)
+            return await bot.copy_messages(**kwargs)

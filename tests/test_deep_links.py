@@ -1,6 +1,8 @@
 import unittest
 
-from bot.services.deep_links import build_deep_link, generate_token, is_valid_token, validate_website_id
+from bot.services.deep_links import (
+    build_deep_link, generate_token, is_valid_token, validate_website_id,
+)
 
 
 class DeepLinkTests(unittest.TestCase):

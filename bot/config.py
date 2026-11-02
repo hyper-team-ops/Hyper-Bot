@@ -52,6 +52,37 @@ def _integer_set(name: str, *, required: bool = True) -> frozenset[int]:
     return values
 
 
+def _database_url() -> str:
+    value = os.getenv("DATABASE_URL", "sqlite:///data/hyperbot.db").strip()
+    if not value.startswith("sqlite:///"):
+        raise ConfigurationError(
+            "Only sqlite:/// DATABASE_URL values are currently supported"
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSettings:
+    """Minimal, secret-free settings needed to export website links."""
+
+    bot_username: str
+    database_url: str
+
+    @classmethod
+    def from_env(
+        cls, *, dotenv_path: Path = Path(".env")
+    ) -> "CatalogSettings":
+        _load_dotenv(dotenv_path)
+        return cls(
+            bot_username=_required("BOT_USERNAME").lstrip("@"),
+            database_url=_database_url(),
+        )
+
+    @property
+    def database_path(self) -> Path:
+        return Path(self.database_url.removeprefix("sqlite:///"))
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     bot_token: str
@@ -60,7 +91,6 @@ class Settings:
     download_request_chat_id: int
     complaint_recipient_chat_id: int
     admin_user_ids: frozenset[int]
-    admin_chat_ids: frozenset[int]
     database_url: str
     log_level: str
     rate_limit_requests: int
@@ -70,9 +100,7 @@ class Settings:
     def from_env(cls, *, dotenv_path: Path = Path(".env")) -> "Settings":
         _load_dotenv(dotenv_path)
         username = _required("BOT_USERNAME").lstrip("@")
-        database_url = os.getenv("DATABASE_URL", "sqlite:///data/hyperbot.db").strip()
-        if not database_url.startswith("sqlite:///"):
-            raise ConfigurationError("Only sqlite:/// DATABASE_URL values are currently supported")
+        database_url = _database_url()
         try:
             requests = int(os.getenv("RATE_LIMIT_REQUESTS", "5"))
             window = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
@@ -87,7 +115,6 @@ class Settings:
             download_request_chat_id=_integer("DOWNLOAD_REQUEST_CHAT_ID"),
             complaint_recipient_chat_id=_integer("COMPLAINT_RECIPIENT_CHAT_ID"),
             admin_user_ids=_integer_set("ADMIN_USER_IDS"),
-            admin_chat_ids=_integer_set("ADMIN_CHAT_IDS", required=False),
             database_url=database_url,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             rate_limit_requests=requests,

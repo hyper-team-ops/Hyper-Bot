@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,8 +32,17 @@ class SQLiteFileRepository:
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 PRAGMA journal_mode = WAL;
@@ -60,97 +70,192 @@ class SQLiteFileRepository:
                     ON file_records(public_token, active);
                 CREATE INDEX IF NOT EXISTS idx_file_records_title
                     ON file_records(title);
+                CREATE INDEX IF NOT EXISTS idx_file_messages_message_id
+                    ON file_messages(message_id);
                 """
+            )
+
+    def _assert_messages_available(
+        self,
+        connection: sqlite3.Connection,
+        source_channel_id: int,
+        message_ids: Sequence[int],
+        *,
+        excluding_record_id: int | None = None,
+    ) -> None:
+        if not message_ids:
+            raise ValueError("A file mapping requires at least one message ID")
+        placeholders = ",".join("?" for _ in message_ids)
+        sql = f"""SELECT fm.message_id
+            FROM file_messages AS fm
+            JOIN file_records AS fr ON fr.id = fm.file_record_id
+            WHERE fr.source_channel_id = ? AND fm.message_id IN ({placeholders})"""
+        params: list[object] = [source_channel_id, *message_ids]
+        if excluding_record_id is not None:
+            sql += " AND fr.id != ?"
+            params.append(excluding_record_id)
+        collision = connection.execute(sql, params).fetchone()
+        if collision is not None:
+            raise DuplicateFileError(
+                "A source message is already assigned to another website resource"
             )
 
     @staticmethod
     def _record(row: sqlite3.Row, message_ids: Sequence[int]) -> FileRecord:
         return FileRecord(
-            id=row["id"], website_id=row["website_id"], title=row["title"],
-            public_token=row["public_token"], source_channel_id=row["source_channel_id"],
-            message_ids=tuple(message_ids), file_type=row["file_type"],
-            description=row["description"], active=bool(row["active"]),
+            id=row["id"],
+            website_id=row["website_id"],
+            title=row["title"],
+            public_token=row["public_token"],
+            source_channel_id=row["source_channel_id"],
+            message_ids=tuple(message_ids),
+            file_type=row["file_type"],
+            description=row["description"],
+            active=bool(row["active"]),
             strip_captions=bool(row["strip_captions"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
-    def _messages(self, connection: sqlite3.Connection, record_id: int) -> tuple[int, ...]:
+    def _messages(
+        self, connection: sqlite3.Connection, record_id: int
+    ) -> tuple[int, ...]:
         rows = connection.execute(
-            "SELECT message_id FROM file_messages WHERE file_record_id = ? ORDER BY position",
+            """SELECT message_id FROM file_messages
+            WHERE file_record_id = ? ORDER BY position""",
             (record_id,),
         ).fetchall()
         return tuple(row["message_id"] for row in rows)
 
-    def create(self, *, website_id: str, title: str, public_token: str,
-               source_channel_id: int, message_ids: Sequence[int],
-               file_type: str | None = None, description: str | None = None,
-               strip_captions: bool = True) -> FileRecord:
+    def create(
+        self,
+        *,
+        website_id: str,
+        title: str,
+        public_token: str,
+        source_channel_id: int,
+        message_ids: Sequence[int],
+        file_type: str | None = None,
+        description: str | None = None,
+        strip_captions: bool = True,
+    ) -> FileRecord:
         now = datetime.now(UTC).isoformat()
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
+                self._assert_messages_available(
+                    connection, source_channel_id, message_ids
+                )
                 cursor = connection.execute(
                     """INSERT INTO file_records
                     (website_id, title, public_token, source_channel_id, file_type,
                      description, strip_captions, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (website_id, title, public_token, source_channel_id, file_type,
-                     description, int(strip_captions), now, now),
+                    (
+                        website_id,
+                        title,
+                        public_token,
+                        source_channel_id,
+                        file_type,
+                        description,
+                        int(strip_captions),
+                        now,
+                        now,
+                    ),
                 )
                 record_id = int(cursor.lastrowid)
                 connection.executemany(
-                    "INSERT INTO file_messages(file_record_id, position, message_id) VALUES (?, ?, ?)",
-                    ((record_id, position, message_id) for position, message_id in enumerate(message_ids)),
+                    """INSERT INTO file_messages
+                    (file_record_id, position, message_id) VALUES (?, ?, ?)""",
+                    (
+                        (record_id, position, message_id)
+                        for position, message_id in enumerate(message_ids)
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
-            raise DuplicateFileError("Website ID, token, or message order conflicts with an existing entry") from exc
+            raise DuplicateFileError(
+                "Website ID, token, or message order conflicts with an existing entry"
+            ) from exc
         record = self.get_by_website_id(website_id)
         assert record is not None
         return record
 
-    def get_by_token(self, public_token: str, *, active_only: bool = True) -> FileRecord | None:
+    def get_by_token(
+        self, public_token: str, *, active_only: bool = True
+    ) -> FileRecord | None:
         sql = "SELECT * FROM file_records WHERE public_token = ?"
         params: tuple[object, ...] = (public_token,)
         if active_only:
             sql += " AND active = 1"
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(sql, params).fetchone()
-            return self._record(row, self._messages(connection, row["id"])) if row else None
+            return (
+                self._record(row, self._messages(connection, row["id"]))
+                if row
+                else None
+            )
 
     def get_by_website_id(self, website_id: str) -> FileRecord | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM file_records WHERE website_id = ?", (website_id,)
             ).fetchone()
-            return self._record(row, self._messages(connection, row["id"])) if row else None
+            return (
+                self._record(row, self._messages(connection, row["id"]))
+                if row
+                else None
+            )
 
-    def update_messages(self, website_id: str, message_ids: Sequence[int],
-                        source_channel_id: int | None = None) -> FileRecord:
+    def update_messages(
+        self,
+        website_id: str,
+        message_ids: Sequence[int],
+        source_channel_id: int | None = None,
+    ) -> FileRecord:
         now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
-                "SELECT id, source_channel_id FROM file_records WHERE website_id = ?", (website_id,)
+                "SELECT id, source_channel_id FROM file_records WHERE website_id = ?",
+                (website_id,),
             ).fetchone()
             if row is None:
                 raise FileNotFoundError(website_id)
             record_id = row["id"]
-            connection.execute("DELETE FROM file_messages WHERE file_record_id = ?", (record_id,))
-            connection.executemany(
-                "INSERT INTO file_messages(file_record_id, position, message_id) VALUES (?, ?, ?)",
-                ((record_id, position, message_id) for position, message_id in enumerate(message_ids)),
+            target_channel_id = (
+                source_channel_id
+                if source_channel_id is not None
+                else row["source_channel_id"]
+            )
+            self._assert_messages_available(
+                connection,
+                target_channel_id,
+                message_ids,
+                excluding_record_id=record_id,
             )
             connection.execute(
-                "UPDATE file_records SET source_channel_id = ?, updated_at = ? WHERE id = ?",
-                (source_channel_id or row["source_channel_id"], now, record_id),
+                "DELETE FROM file_messages WHERE file_record_id = ?", (record_id,)
+            )
+            connection.executemany(
+                """INSERT INTO file_messages
+                (file_record_id, position, message_id) VALUES (?, ?, ?)""",
+                (
+                    (record_id, position, message_id)
+                    for position, message_id in enumerate(message_ids)
+                ),
+            )
+            connection.execute(
+                """UPDATE file_records
+                SET source_channel_id = ?, updated_at = ? WHERE id = ?""",
+                (target_channel_id, now, record_id),
             )
         record = self.get_by_website_id(website_id)
         assert record is not None
         return record
 
     def set_active(self, website_id: str, active: bool) -> FileRecord:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
-                "UPDATE file_records SET active = ?, updated_at = ? WHERE website_id = ?",
+                """UPDATE file_records
+                SET active = ?, updated_at = ? WHERE website_id = ?""",
                 (int(active), datetime.now(UTC).isoformat(), website_id),
             )
             if cursor.rowcount == 0:
@@ -160,17 +265,27 @@ class SQLiteFileRepository:
         return record
 
     def delete(self, website_id: str) -> None:
-        with self._connect() as connection:
-            cursor = connection.execute("DELETE FROM file_records WHERE website_id = ?", (website_id,))
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM file_records WHERE website_id = ?", (website_id,)
+            )
             if cursor.rowcount == 0:
                 raise FileNotFoundError(website_id)
 
-    def list(self, query: str | None = None, *, include_inactive: bool = True) -> list[FileRecord]:
+    def list(
+        self, query: str | None = None, *, include_inactive: bool = True
+    ) -> list[FileRecord]:
         clauses: list[str] = []
         params: list[object] = []
         if query:
-            clauses.append("(website_id LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\')")
-            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append(
+                "(website_id LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\')"
+            )
+            escaped = (
+                query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
             params.extend((f"%{escaped}%", f"%{escaped}%"))
         if not include_inactive:
             clauses.append("active = 1")
@@ -178,6 +293,9 @@ class SQLiteFileRepository:
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at DESC"
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(sql, params).fetchall()
-            return [self._record(row, self._messages(connection, row["id"])) for row in rows]
+            return [
+                self._record(row, self._messages(connection, row["id"]))
+                for row in rows
+            ]

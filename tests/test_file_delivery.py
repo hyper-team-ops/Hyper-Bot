@@ -34,9 +34,25 @@ class FileDeliveryTests(unittest.IsolatedAsyncioTestCase):
         bot = AsyncMock()
         result = await FileDeliveryService().deliver(bot, 777, record(9, 7, 8))
         self.assertTrue(result.complete)
-        self.assertEqual([9, 7, 8], [call.kwargs["message_id"] for call in bot.copy_message.await_args_list])
-        self.assertTrue(all(call.kwargs["from_chat_id"] == -100999 for call in bot.copy_message.await_args_list))
-        self.assertTrue(all(call.kwargs["caption"] == "" for call in bot.copy_message.await_args_list))
+        self.assertEqual(
+            [9, 7, 8],
+            [
+                call.kwargs["message_id"]
+                for call in bot.copy_message.await_args_list
+            ],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["from_chat_id"] == -100999
+                for call in bot.copy_message.await_args_list
+            )
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["caption"] == ""
+                for call in bot.copy_message.await_args_list
+            )
+        )
         self.assertFalse(hasattr(bot, "forward_message") and bot.forward_message.await_count)
 
     async def test_unavailable_source_becomes_safe_delivery_error(self):
@@ -47,9 +63,39 @@ class FileDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_album_can_be_batch_copied_when_captions_are_safe(self):
         bot = AsyncMock()
+        bot.copy_messages.return_value = (object(), object(), object())
         result = await FileDeliveryService().deliver(bot, 777, album_record(20, 21, 22))
         self.assertTrue(result.complete)
         bot.copy_messages.assert_awaited_once_with(
             chat_id=777, from_chat_id=-100999, message_ids=(20, 21, 22)
         )
         bot.copy_message.assert_not_awaited()
+
+    async def test_partial_batch_copy_is_reported(self):
+        bot = AsyncMock()
+        bot.copy_messages.return_value = (object(), object())
+        with self.assertRaises(DeliveryError) as caught:
+            await FileDeliveryService().deliver(bot, 777, album_record(20, 21, 22))
+        self.assertEqual(2, caught.exception.delivered)
+
+    async def test_inactive_record_is_not_delivered(self):
+        item = record(9)
+        inactive = FileRecord(
+            id=item.id, website_id=item.website_id, title=item.title,
+            public_token=item.public_token, source_channel_id=item.source_channel_id,
+            message_ids=item.message_ids, file_type=item.file_type,
+            description=item.description, active=False,
+            strip_captions=item.strip_captions, created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+        bot = AsyncMock()
+        with self.assertRaises(DeliveryError):
+            await FileDeliveryService().deliver(bot, 777, inactive)
+        bot.copy_message.assert_not_awaited()
+
+    async def test_service_rejects_group_chat_ids(self):
+        bot = AsyncMock()
+        with self.assertRaises(DeliveryError):
+            await FileDeliveryService().deliver(bot, -100777, record(9))
+        bot.copy_message.assert_not_awaited()
+        bot.copy_messages.assert_not_awaited()

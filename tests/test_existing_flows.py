@@ -10,7 +10,7 @@ def settings():
     return Settings(
         bot_token="test", bot_username="test_bot", source_channel_id=-1001,
         download_request_chat_id=-1002, complaint_recipient_chat_id=300,
-        admin_user_ids=frozenset({1}), admin_chat_ids=frozenset(),
+        admin_user_ids=frozenset({1}),
         database_url="sqlite:///:memory:", log_level="INFO",
         rate_limit_requests=5, rate_limit_window_seconds=60,
     )

@@ -45,3 +45,8 @@ class FileRegistryTests(unittest.TestCase):
         updated = self.registry.replace_messages("replace-me", [5, 6])
         self.assertEqual(old.public_token, updated.public_token)
         self.assertEqual((5, 6), updated.message_ids)
+
+    def test_source_message_collision_is_rejected(self):
+        self.registry.register("first", "First", [80])
+        with self.assertRaises(DuplicateFileError):
+            self.registry.register("second", "Second", [80])

@@ -57,7 +57,8 @@ def create_menu_handler(settings: Settings):
             await message.reply_text(ARCHIVE_TEXT, parse_mode="Markdown")
         elif text == DOWNLOAD_REQUEST:
             await message.reply_text(
-                "فضلاً، أرسل اسم الكورس أو البرنامج وحدد نوعه، وأرفق الرابط إن توفر. استخدم /cancel للإلغاء.",
+                "فضلاً، أرسل اسم الكورس أو البرنامج وحدد نوعه، وأرفق الرابط "
+                "إن توفر. استخدم /cancel للإلغاء.",
                 reply_markup=ReplyKeyboardRemove(),
             )
             return SEND_REQUEST
@@ -65,7 +66,8 @@ def create_menu_handler(settings: Settings):
             await message.reply_text(TEAM_TEXT)
         elif text == COMPLAINT:
             await message.reply_text(
-                "أرسل الشكوى أو الاقتراح من فضلك. ستصل الرسالة دون اسمك أو معرّفك. استخدم /cancel للإلغاء.",
+                "أرسل الشكوى أو الاقتراح من فضلك. ستصل الرسالة دون اسمك أو "
+                "معرّفك. استخدم /cancel للإلغاء.",
                 reply_markup=ReplyKeyboardRemove(),
             )
             return COMPLAINT_STATE
@@ -84,11 +86,15 @@ def create_request_handler(settings: Settings):
         try:
             await context.bot.send_message(
                 settings.download_request_chat_id,
-                f"طلب تحميل جديد\nرقم المحادثة: {message.chat_id}\nالمحتوى:\n{message.text}",
+                f"طلب تحميل جديد\nرقم المحادثة: {message.chat_id}"
+                f"\nالمحتوى:\n{message.text}",
             )
-        except TelegramError:
-            logger.exception("Unable to send download request")
-            await message.reply_text("⚠️ تعذر استلام الطلب حالياً. يرجى المحاولة لاحقاً.", reply_markup=main_menu())
+        except TelegramError as exc:
+            logger.warning("Unable to send download request: %s", type(exc).__name__)
+            await message.reply_text(
+                "⚠️ تعذر استلام الطلب حالياً. يرجى المحاولة لاحقاً.",
+                reply_markup=main_menu(),
+            )
             return ConversationHandler.END
         await message.reply_text(
             "تم استلام طلبك، وسيتم إعلامك عند انتهاء تحميله.", reply_markup=main_menu()
@@ -99,7 +105,9 @@ def create_request_handler(settings: Settings):
 
 
 def create_complaint_handler(settings: Settings):
-    async def receive_complaint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    async def receive_complaint(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> int:
         message = update.effective_message
         if message is None or not message.text:
             return ConversationHandler.END
@@ -109,11 +117,17 @@ def create_complaint_handler(settings: Settings):
                 settings.complaint_recipient_chat_id,
                 f"شكوى أو اقتراح مجهول:\n\n{message.text}",
             )
-        except TelegramError:
-            logger.exception("Unable to send anonymous complaint")
-            await message.reply_text("⚠️ تعذر استلام الرسالة حالياً. يرجى المحاولة لاحقاً.", reply_markup=main_menu())
+        except TelegramError as exc:
+            logger.warning("Unable to send anonymous complaint: %s", type(exc).__name__)
+            await message.reply_text(
+                "⚠️ تعذر استلام الرسالة حالياً. يرجى المحاولة لاحقاً.",
+                reply_markup=main_menu(),
+            )
             return ConversationHandler.END
-        await message.reply_text("تم استلام الرسالة بشكل مجهول، شكراً لاقتراحك.", reply_markup=main_menu())
+        await message.reply_text(
+            "تم استلام الرسالة بشكل مجهول، شكراً لاقتراحك.",
+            reply_markup=main_menu(),
+        )
         return ConversationHandler.END
 
     return receive_complaint
