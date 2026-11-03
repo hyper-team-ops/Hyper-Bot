@@ -8,7 +8,12 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from bot.database.models import FileRecord
+from bot.database.models import (
+    DiscoveredMessage,
+    FileRecord,
+    MatchCandidate,
+    StorageTopic,
+)
 
 
 class DuplicateFileError(ValueError):
@@ -72,8 +77,97 @@ class SQLiteFileRepository:
                     ON file_records(title);
                 CREATE INDEX IF NOT EXISTS idx_file_messages_message_id
                     ON file_messages(message_id);
+                CREATE TABLE IF NOT EXISTS storage_topics (
+                    source_chat_id INTEGER NOT NULL,
+                    topic_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    discovered_at TEXT NOT NULL,
+                    PRIMARY KEY(source_chat_id, topic_id)
+                );
+                CREATE TABLE IF NOT EXISTS discovered_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL CHECK(message_id > 0),
+                    topic_id INTEGER,
+                    topic_title TEXT,
+                    filename TEXT,
+                    caption TEXT,
+                    file_size INTEGER,
+                    mime_type TEXT,
+                    media_group_id TEXT,
+                    message_date TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'new',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_chat_id, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_discovered_state
+                    ON discovered_messages(state, topic_id);
+                CREATE INDEX IF NOT EXISTS idx_discovered_media_group
+                    ON discovered_messages(source_chat_id, media_group_id);
+                CREATE TABLE IF NOT EXISTS match_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discovered_message_id INTEGER NOT NULL
+                        REFERENCES discovered_messages(id) ON DELETE CASCADE,
+                    website_file_id TEXT,
+                    website_title TEXT,
+                    confidence REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    reason TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    UNIQUE(discovered_message_id, website_file_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_match_candidates_status
+                    ON match_candidates(status, created_at);
+                CREATE TABLE IF NOT EXISTS review_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    candidate_id INTEGER NOT NULL REFERENCES match_candidates(id),
+                    admin_user_id INTEGER NOT NULL,
+                    decision TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS import_checkpoints (
+                    source_chat_id INTEGER NOT NULL,
+                    topic_id INTEGER NOT NULL DEFAULT 0,
+                    last_message_id INTEGER NOT NULL DEFAULT 0,
+                    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0, 1)),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(source_chat_id, topic_id)
+                );
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    website_file_id TEXT PRIMARY KEY,
+                    sheet_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 2;
                 """
             )
+
+    @staticmethod
+    def _discovered(row: sqlite3.Row) -> DiscoveredMessage:
+        return DiscoveredMessage(
+            id=row["id"], source_chat_id=row["source_chat_id"],
+            message_id=row["message_id"], topic_id=row["topic_id"],
+            topic_title=row["topic_title"], filename=row["filename"],
+            caption=row["caption"], file_size=row["file_size"],
+            mime_type=row["mime_type"], media_group_id=row["media_group_id"],
+            message_date=datetime.fromisoformat(row["message_date"]),
+            state=row["state"], created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
+    def _candidate(row: sqlite3.Row) -> MatchCandidate:
+        return MatchCandidate(
+            id=row["id"], discovered_message_id=row["discovered_message_id"],
+            website_file_id=row["website_file_id"], website_title=row["website_title"],
+            confidence=row["confidence"], status=row["status"], reason=row["reason"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            decided_at=(datetime.fromisoformat(row["decided_at"])
+                        if row["decided_at"] else None),
+        )
 
     def _assert_messages_available(
         self,
@@ -299,3 +393,260 @@ class SQLiteFileRepository:
                 self._record(row, self._messages(connection, row["id"]))
                 for row in rows
             ]
+
+    # Discovery/import operations intentionally share this repository so deduplication,
+    # review decisions, and registrations are committed in one SQLite database.
+    def upsert_topic(self, source_chat_id: int, topic_id: int, title: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO storage_topics
+                (source_chat_id, topic_id, title, discovered_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_chat_id, topic_id) DO UPDATE SET title=excluded.title""",
+                (source_chat_id, topic_id, title, now),
+            )
+
+    def list_topics(self, source_chat_id: int) -> list[StorageTopic]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM storage_topics WHERE source_chat_id=? ORDER BY topic_id",
+                (source_chat_id,),
+            ).fetchall()
+        return [StorageTopic(row["source_chat_id"], row["topic_id"], row["title"],
+                             datetime.fromisoformat(row["discovered_at"])) for row in rows]
+
+    def add_discovered_message(
+        self, *, source_chat_id: int, message_id: int, topic_id: int | None,
+        topic_title: str | None, filename: str | None, caption: str | None,
+        file_size: int | None, mime_type: str | None, media_group_id: str | None,
+        message_date: datetime, state: str = "new",
+    ) -> tuple[DiscoveredMessage, bool]:
+        now = datetime.now(UTC).isoformat()
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=UTC)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO discovered_messages
+                (source_chat_id, message_id, topic_id, topic_title, filename, caption,
+                 file_size, mime_type, media_group_id, message_date, state, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (source_chat_id, message_id, topic_id, topic_title, filename, caption,
+                 file_size, mime_type, media_group_id, message_date.isoformat(), state, now),
+            )
+            created = cursor.rowcount == 1
+            row = connection.execute(
+                "SELECT * FROM discovered_messages WHERE source_chat_id=? AND message_id=?",
+                (source_chat_id, message_id),
+            ).fetchone()
+        assert row is not None
+        return self._discovered(row), created
+
+    def get_discovered(self, discovered_id: int) -> DiscoveredMessage | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM discovered_messages WHERE id=?", (discovered_id,)
+            ).fetchone()
+        return self._discovered(row) if row else None
+
+    def get_discovered_message(
+        self, source_chat_id: int, message_id: int
+    ) -> DiscoveredMessage | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM discovered_messages
+                WHERE source_chat_id=? AND message_id=?""",
+                (source_chat_id, message_id),
+            ).fetchone()
+        return self._discovered(row) if row else None
+
+    def list_discovered(
+        self, *, state: str | None = None, topic_id: int | None = None,
+        media_group_id: str | None = None,
+    ) -> list[DiscoveredMessage]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (("state", state), ("topic_id", topic_id),
+                              ("media_group_id", media_group_id)):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        sql = "SELECT * FROM discovered_messages"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY message_id"
+        with self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._discovered(row) for row in rows]
+
+    def set_discovered_state(self, discovered_id: int, state: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE discovered_messages SET state=? WHERE id=?", (state, discovered_id)
+            )
+
+    def add_match_candidate(
+        self, *, discovered_message_id: int, website_file_id: str | None,
+        website_title: str | None, confidence: float, status: str,
+        reason: str | None = None,
+    ) -> MatchCandidate:
+        now = datetime.now(UTC).isoformat()
+        with self._connection() as connection:
+            existing = connection.execute(
+                """SELECT * FROM match_candidates WHERE discovered_message_id=?
+                AND website_file_id IS ?""",
+                (discovered_message_id, website_file_id),
+            ).fetchone()
+            if existing is not None:
+                return self._candidate(existing)
+            connection.execute(
+                """INSERT INTO match_candidates
+                (discovered_message_id, website_file_id, website_title, confidence,
+                 status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (discovered_message_id, website_file_id, website_title, confidence,
+                 status, reason, now),
+            )
+            row = connection.execute(
+                """SELECT * FROM match_candidates WHERE discovered_message_id=?
+                AND website_file_id IS ?""",
+                (discovered_message_id, website_file_id),
+            ).fetchone()
+        assert row is not None
+        return self._candidate(row)
+
+    def choose_candidate_match(
+        self, candidate_id: int, website_file_id: str, website_title: str,
+    ) -> MatchCandidate:
+        with self._connection() as connection:
+            connection.execute(
+                """UPDATE match_candidates SET website_file_id=?, website_title=?,
+                status='ambiguous' WHERE id=? AND status NOT IN
+                ('approved', 'rejected', 'ignored')""",
+                (website_file_id, website_title, candidate_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM match_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError(str(candidate_id))
+        return self._candidate(row)
+
+    def mark_related_registered(self, discovered_ids: Sequence[int]) -> None:
+        if not discovered_ids:
+            return
+        placeholders = ",".join("?" for _ in discovered_ids)
+        with self._connection() as connection:
+            connection.execute(
+                f"UPDATE discovered_messages SET state='registered' WHERE id IN ({placeholders})",
+                list(discovered_ids),
+            )
+            connection.execute(
+                f"""UPDATE match_candidates SET status=CASE
+                WHEN status='approved' THEN 'approved' ELSE 'grouped' END,
+                decided_at=COALESCE(decided_at, ?) WHERE discovered_message_id IN
+                ({placeholders}) AND status NOT IN ('rejected', 'ignored')""",
+                [datetime.now(UTC).isoformat(), *discovered_ids],
+            )
+
+    def get_candidate(self, candidate_id: int) -> MatchCandidate | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM match_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+        return self._candidate(row) if row else None
+
+    def list_candidates(
+        self, *, statuses: Sequence[str] = ("exact", "ambiguous", "unmatched"),
+        query: str | None = None, topic_id: int | None = None, limit: int = 100,
+    ) -> list[MatchCandidate]:
+        placeholders = ",".join("?" for _ in statuses)
+        clauses = [f"mc.status IN ({placeholders})"]
+        params: list[object] = list(statuses)
+        if query:
+            clauses.append("(dm.filename LIKE ? OR mc.website_title LIKE ?)")
+            params.extend((f"%{query}%", f"%{query}%"))
+        if topic_id is not None:
+            clauses.append("dm.topic_id=?")
+            params.append(topic_id)
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT mc.* FROM match_candidates mc
+                JOIN discovered_messages dm ON dm.id=mc.discovered_message_id
+                WHERE """ + " AND ".join(clauses) +
+                " ORDER BY mc.confidence DESC, mc.created_at LIMIT ?", params,
+            ).fetchall()
+        return [self._candidate(row) for row in rows]
+
+    def decide_candidate(
+        self, candidate_id: int, *, decision: str, admin_user_id: int,
+        notes: str | None = None,
+    ) -> MatchCandidate:
+        now = datetime.now(UTC).isoformat()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM match_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError(str(candidate_id))
+            # Idempotent callbacks do not append conflicting audit entries.
+            if row["status"] in {"approved", "rejected", "ignored"}:
+                return self._candidate(row)
+            connection.execute(
+                "UPDATE match_candidates SET status=?, decided_at=? WHERE id=?",
+                (decision, now, candidate_id),
+            )
+            connection.execute(
+                """INSERT INTO review_decisions
+                (candidate_id, admin_user_id, decision, notes, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (candidate_id, admin_user_id, decision, notes, now),
+            )
+            state = "registered" if decision == "approved" else decision
+            connection.execute(
+                "UPDATE discovered_messages SET state=? WHERE id=?",
+                (state, row["discovered_message_id"]),
+            )
+            updated = connection.execute(
+                "SELECT * FROM match_candidates WHERE id=?", (candidate_id,)
+            ).fetchone()
+        assert updated is not None
+        return self._candidate(updated)
+
+    def get_checkpoint(self, source_chat_id: int, topic_id: int | None) -> tuple[int, bool]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT last_message_id, complete FROM import_checkpoints
+                WHERE source_chat_id=? AND topic_id=?""",
+                (source_chat_id, topic_id or 0),
+            ).fetchone()
+        return (row["last_message_id"], bool(row["complete"])) if row else (0, False)
+
+    def save_checkpoint(
+        self, source_chat_id: int, topic_id: int | None, last_message_id: int,
+        *, complete: bool = False,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO import_checkpoints
+                (source_chat_id, topic_id, last_message_id, complete, updated_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(source_chat_id, topic_id) DO UPDATE SET
+                last_message_id=excluded.last_message_id, complete=excluded.complete,
+                updated_at=excluded.updated_at""",
+                (source_chat_id, topic_id or 0, last_message_id, int(complete),
+                 datetime.now(UTC).isoformat()),
+            )
+
+    def set_sync_state(
+        self, website_file_id: str, sheet_name: str, status: str,
+        last_error: str | None = None,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO sync_state
+                (website_file_id, sheet_name, status, last_error, updated_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT(website_file_id) DO UPDATE SET
+                sheet_name=excluded.sheet_name, status=excluded.status,
+                last_error=excluded.last_error, updated_at=excluded.updated_at""",
+                (website_file_id, sheet_name, status, last_error,
+                 datetime.now(UTC).isoformat()),
+            )

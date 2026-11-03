@@ -9,3 +9,11 @@ __pycache__/
 .coverage
 .venv/
 venv/
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+telethon/
+credentials*.json
+service-account*.json
+google-credentials*.json

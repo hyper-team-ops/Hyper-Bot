@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.config import Settings
 from bot.database.repository import SQLiteFileRepository
-from bot.handlers.flows import ADMIN_BUTTONS
+from bot.handlers.flows import ADMIN_BUTTONS, SEND_REQUEST
 from bot.keyboards.keyboards import admin_menu, main_menu
 from bot.middleware.authorization import is_admin
 from bot.services.deep_links import is_valid_token
@@ -47,6 +47,12 @@ def create_start_handler(settings: Settings, repository: SQLiteFileRepository,
                     "🔒 إرسال الملفات متاح فقط في المحادثة الخاصة مع البوت."
                 )
                 return ConversationHandler.END
+            if payload == "request":
+                await message.reply_text(
+                    "فضلاً، أرسل اسم الكورس أو البرنامج وحدد نوعه، وأرفق الرابط "
+                    "إن توفر. استخدم /cancel للإلغاء."
+                )
+                return SEND_REQUEST
             if not is_valid_token(payload):
                 await message.reply_text(
                     "❌ عذراً، الملف المطلوب غير متوفر حالياً.",

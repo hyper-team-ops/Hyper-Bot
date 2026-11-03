@@ -1,285 +1,394 @@
-# Hyper Team Telegram Bot
+# HyperBot
 
-A modular Python bot for the Hyper Team at the Faculty of Informatics Engineering,
-University of Aleppo. It preserves the Arabic availability, download-request,
-anonymous-complaint, team-information, administrator-message, and completion-notice
-flows, and adds persistent website-to-Telegram file delivery.
+HyperBot is the official Telegram bot for Hyper Team at the Faculty of Informatics
+Engineering, University of Aleppo. It keeps the existing Arabic menus, availability
+inquiries, download requests, anonymous complaints, administrator messages, and file
+delivery, and adds a safe integration between the **Hyper Vault forum supergroup**, a
+Google Sheets website catalog, and private Telegram delivery.
 
-## How delivery works
+The source group is never modified. The historical importer reads metadata only; it
+does not download media. Public Google Sheets rows receive only a random bot deep link
+and an availability status—never a group ID, message ID, topic ID, token, or credential.
+
+## Architecture and safety
 
 ```text
-Website item (stable website_id)
-        │
-        ▼
-Public URL containing a random token only
-        │  https://t.me/HyperTeamITE_Bot?start=f_<random>
-        ▼
-SQLite FileRecord ──► ordered private-channel message IDs
-        │
-        ▼
-Bot API copy_message ──► user's private chat
+Hyper Vault forum (read only)
+  ├─ Telethon historical scanner ─┐
+  └─ Bot API new-message updates ─┴─> filter -> conservative matcher -> SQLite review queue
+                                                       │
+Google Sheets catalog <──────── approved link sync <───┤
+                                                       ▼
+Website deep link -> private /start f_<random> -> copy_message(s) -> visitor
 ```
 
-The user never receives the source channel ID or a forwarded-from attribution. Files
-are delivered only in a private chat. Each message is copied, never downloaded to this
-server and never forwarded. Captions are removed by default so a caption cannot
-disclose storage-channel branding. The success message is sent only after Telegram
-confirms that every configured message was copied.
+`copy_message`/`copy_messages` is used, never forwarding. Captions are removed by
+default. Delivery is private-chat-only and succeeds only for approved, active records.
+Tokens remain stable when a source mapping, title, or sheet row changes. Albums and
+administrator-grouped multipart resources preserve their approved ordering.
 
-Possession of a link is sufficient to download its resource. The links are difficult
-to guess, but they are bearer links—not per-user access control.
+## Fedora installation
 
-## Requirements and installation
-
-- Python 3.11 or newer
-- A Telegram bot with a **new** BotFather token
-- A private channel containing the source files
+Install Python and build tools, clone the repository, and create an isolated virtual
+environment:
 
 ```bash
-python -m venv .venv
+sudo dnf install python3 python3-pip git sqlite
+git clone https://github.com/kassemyahia/hyperBot.git
+cd hyperBot
+python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 cp .env.example .env
+chmod 600 .env
 ```
 
-Fill every required value in `.env`, then run:
+Python 3.11 or newer is recommended. Activate `.venv` again in each new shell.
+
+## Telegram bot and Hyper Vault setup
+
+1. In `@BotFather`, create the bot or rotate its token with `/revoke`. A token present
+   in the legacy source must be considered compromised and must never be reused.
+2. Set the new token and bot username in `.env`.
+3. Add the bot to the existing **Hyper Vault** supergroup.
+4. Disable BotFather privacy mode for this bot so it receives ordinary group media
+   updates, or grant the bot administrator access. It needs to see messages and read
+   topics; it does not need permission to delete or edit source messages.
+5. Protected content cannot be copied by the Bot API. Disable content protection for
+   resources intended for delivery, or leave those resources unavailable.
+6. Obtain the numeric group ID (normally `-100...`) using a temporary diagnostic bot,
+   Telegram API tool, or by inspecting an update while the bot is in the group. Set it
+   as `SOURCE_CHAT_ID`. Do not use a public `@username`.
+
+Run the topic discovery command after configuring Telethon; it prints the authoritative
+numeric IDs and titles:
 
 ```bash
-python -m bot.main
-# `python app.py` remains a compatible entry point.
+python -m scripts.import_group --list-topics
 ```
 
-The legacy source contained a real bot token. Treat it as compromised: open
-`@BotFather`, use `/revoke` for that bot, generate a new token, and place only the new
-value in `.env`. Do not commit `.env`; it and SQLite runtime files are ignored by Git.
+Configure `INCLUDED_TOPIC_IDS` and `EXCLUDED_TOPIC_IDS` with those IDs. An empty include
+list means all topics. Exclusions win. Names are display metadata and are deliberately
+not used as access policy.
 
 ## Configuration
 
 | Variable | Purpose |
 |---|---|
-| `BOT_TOKEN` | New token issued by BotFather |
-| `BOT_USERNAME` | Bot username without or with `@` |
-| `SOURCE_CHANNEL_ID` | Private file-storage channel ID |
-| `DOWNLOAD_REQUEST_CHAT_ID` | Destination for user download requests |
+| `BOT_TOKEN` | Newly rotated BotFather token |
+| `BOT_USERNAME` | Bot username, normally `HyperTeamITE_Bot` |
+| `SOURCE_CHAT_ID` | Numeric Hyper Vault supergroup ID |
+| `SOURCE_CHANNEL_ID` | Deprecated fallback accepted during migration |
+| `ADMIN_USER_IDS` | Comma-separated Telegram **user** IDs; checked on every command/callback |
+| `DOWNLOAD_REQUEST_CHAT_ID` | Destination for existing user download requests |
 | `COMPLAINT_RECIPIENT_CHAT_ID` | Destination for anonymous complaints |
-| `ADMIN_USER_IDS` | Comma-separated Telegram **user** IDs authorized to administer the bot |
-| `DATABASE_URL` | SQLite URL, normally `sqlite:///data/hyperbot.db` |
+| `DATABASE_URL` | `sqlite:///data/hyperbot.db` by default |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | User API credentials for Telethon import |
+| `TELETHON_SESSION_PATH` | Private user session path, without needing a `.session` suffix |
+| `INCLUDED_TOPIC_IDS` / `EXCLUDED_TOPIC_IDS` | Comma-separated actual forum topic IDs |
+| `MIN_FILE_SIZE_BYTES` | Reject smaller media during discovery |
+| `GOOGLE_SHEET_ID` | Private spreadsheet identifier |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Absolute service-account JSON path |
+| `AUTO_APPROVE_EXACT_MATCHES` | Conservative exact-match auto-registration; default `false` |
+| `AUTO_SYNC_GOOGLE_SHEETS` | Sync approvals to Sheets; default `true` |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | Per-user delivery limit |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
-| `RATE_LIMIT_REQUESTS` | File deliveries allowed per user per window (default 5) |
-| `RATE_LIMIT_WINDOW_SECONDS` | Sliding rate-limit window (default 60) |
 
-Startup fails with a clear error when mandatory configuration is absent or malformed.
-Administrator access is always checked against `update.effective_user.id`; channel and
-group IDs do not grant administrator access.
+Secrets, `.env`, Google JSON credentials, SQLite databases, and Telethon session files
+are ignored by Git. Keep them outside the checkout where practical and restrict their
+permissions. Telethon is used only by the separate importer, never by bot delivery.
 
-## Configure the private storage channel
+## Create a private Telethon session
 
-1. Create a private Telegram channel.
-2. Add the bot as an administrator/member able to access channel messages. Giving it
-   permission to post is not required for delivery.
-3. Keep the bot in the channel for as long as registered resources must work.
-4. Ensure the channel does not have protected content enabled; Telegram forbids bots
-   from copying protected messages and this application does not bypass that control.
-5. Set the numeric channel ID as `SOURCE_CHANNEL_ID`.
-6. Upload each resource. For an album or multi-part resource, retain every message ID
-   in the exact desired order.
+Create an application at <https://my.telegram.org>, copy its API ID and API hash into
+`.env`, and choose a private session path. On the first importer command, Telethon asks
+for the account phone number, login code, and (when enabled) 2FA password:
 
-The Bot API cannot request arbitrary historical channel history. This bot deliberately
-does not pretend it can scrape old posts. Existing posts can be registered using known
-message IDs, while new or forwardable posts can use the guided forwarding workflow
-below. Protected channel content cannot be forwarded or copied.
-
-## Register and manage files
-
-All commands below require a Telegram user ID listed in `ADMIN_USER_IDS`.
-
-```text
-/file_register python-basics 451 Python Basics PDF
-/file_register design-assets 500,501,502 Design Assets Album
-/file_register safe-album 510,511 Safe Caption Album --keep-captions
-/file_begin operating-systems Operating Systems Course
-# Forward one source post, several posts, or the complete album to the bot.
-/file_commit
-/file_abort
-/file_link python-basics
-/file_update python-basics 610
-/file_test python-basics
-/file_disable python-basics
-/file_enable python-basics
-/files
-/files python
-/file_delete python-basics
+```bash
+mkdir -p data/telethon
+chmod 700 data/telethon
+python -m scripts.import_group --list-topics
 ```
 
-`website_id` must be a stable 1–100 character ASCII identifier containing letters,
-digits, `.`, `_`, or `-`. Message IDs must be positive, comma-separated, unique, and
-ordered. Registration rejects duplicate website IDs and prevents one source message
-from being accidentally assigned to multiple resources. Updating message mappings
-keeps the same public token and website URL. Editing a source post also leaves its
-public link unchanged. Disabling is preferable when existing links may need to work
-again; deletion is permanent.
+Never paste login codes into source files or commit the resulting `.session` file.
+Use an authorized team-owned Telegram user that already has read access to Hyper Vault.
 
-Registration and source-changing commands run only in a private administrator chat.
-Before saving `/file_register`, `/file_update`, `/file_commit`, or re-enabling a record,
-the bot performs an actual copy into that administrator chat. A mapping is not reported
-as usable or persisted when the test copy fails or returns fewer messages than expected.
-`/file_test` repeats that check for an existing mapping. Telegram offers no metadata-only
-API that proves a message is copyable, so this visible test delivery is intentional.
+## Google Sheets preparation
 
-The guided workflow is recommended for new posts:
+The spreadsheet must contain tabs named `softwares` (current GID `0`) and `courses`
+(current GID `291500461`). Existing columns remain untouched. HyperBot uses these exact
+additional column names:
 
-1. Send `/file_begin website-id Display title` in the bot's private chat.
-2. Forward the exact source-channel message, messages, or complete album to that chat.
-3. Confirm the reported number of captured messages.
-4. Send `/file_commit`; the bot verifies the copy and returns the stable deep link.
+- `File ID`
+- `Telegram Link`
+- `Telegram Status`
 
-Only forwards whose Telegram `forward_origin` identifies the configured storage channel
-are accepted. Drafts are process-local and should be committed before restarting the
-bot; completed mappings are persistent in SQLite. Historical or protected posts that
-cannot be forwarded can still use `/file_register` with administrator-known IDs.
+Create a Google Cloud service account, enable the Google Sheets API, download its JSON
+key to a private location, and share the spreadsheet with the service-account email as
+an editor. Set `GOOGLE_SHEET_ID` and `GOOGLE_APPLICATION_CREDENTIALS`.
 
-Media groups must be registered only after all album messages exist, with every message
-ID in display order. The secure default copies members sequentially and removes their
-captions. If an administrator has verified that every original caption is safe, the
-optional `--keep-captions` flag uses Telegram's `copy_messages` batch operation so the
-client retains album grouping. Telegram does not allow batch copy and caption rewriting
-at the same time, so these modes are intentionally explicit. The bot validates the
-number of message identifiers returned by the batch API and treats a short response as
-a partial failure.
+Adding stable IDs is an explicit, one-time operation:
 
-## Website integration
+```bash
+python -m scripts.sync_catalog --initialize-ids
+```
 
-No website source is present in this repository. The integration contract is therefore
-a static, production-usable export containing only:
+It fills only missing IDs for named rows, prefixes IDs by tab (`sw_` or `course_`), and
+never regenerates an existing ID. Row numbers are not identities. Review the sheet and
+back it up before this first write. Routine import never creates unknown public rows.
 
-- stable `website_id`
-- display `title`
-- public `telegram_url`
-- active status
+To retry/synchronize all existing registry records:
 
-Export active records as JSON or CSV:
+```bash
+python -m scripts.sync_catalog --sync
+```
+
+Approvals write only `Telegram Link` and `Telegram Status`. Supported statuses are
+`available`, `unavailable`, and `pending_review`. Google failures do not invalidate a
+successful private registration; they are recorded in SQLite and can be retried.
+
+## Historical import
+
+All scans are read-only against Hyper Vault. Useful commands are:
+
+```bash
+# Discover authoritative topic IDs.
+python -m scripts.import_group --list-topics
+
+# Preview/filter/match without changing SQLite.
+python -m scripts.import_group --dry-run --exclude-topics 10,11 --limit 500
+
+# Preview one topic.
+python -m scripts.import_group --preview --topic-id 123 --limit 100
+
+# Persist a complete scan of configured topics.
+python -m scripts.import_group --full-scan --include-topics 123,456
+
+# Continue after Ctrl-C, process restart, or FloodWait interruption.
+python -m scripts.import_group --resume --include-topics 123,456
+
+# Scan and persist only one topic.
+python -m scripts.import_group --full-scan --topic-id 123
+
+# Work without Google access; eligible resources will be unmatched.
+python -m scripts.import_group --dry-run --no-catalog
+
+# Print a review report from SQLite.
+python -m scripts.import_group --report --limit 1000
+```
+
+Checkpoints are stored per source chat and selected topic. Re-running is safe because
+`(source_chat_id, message_id)` is unique. `Ctrl-C` saves progress. Telegram FloodWait
+requests save a checkpoint and are respected before the scan resumes. Use `--limit` for
+small operational batches; a limited run is intentionally not marked complete.
+
+The filter ignores text conversations, empty and service messages, topic create/edit
+events, excluded topics, unsupported media, too-small files, duplicates, and previous
+decisions. Metadata includes filename, caption, size, MIME type, album ID, timestamp,
+and topic association; media bytes are never downloaded.
+
+Matching normalizes case, separators, CamelCase, versions, common installer noise, and
+selected product aliases. Size, extension, category, caption, and topic title provide
+secondary evidence. A unique high score is `exact`; competing or weak signals are
+`ambiguous`; absent reliable evidence is `unmatched`. Conservative automatic approval
+is off by default and never creates unknown catalog rows.
+
+## Administrator review
+
+Every privileged action validates `update.effective_user.id`; a group/channel ID is
+never accepted as an administrator. Use these commands in the private bot chat:
+
+```text
+/reviews [topic_id]                   summary of pending items
+/review_next                          interactive next item
+/review_search photoshop              search pending discoveries/matches
+/review_decided ignored               list ignored (also accepts rejected)
+/review_approve 17                    approve proposed File ID
+/review_approve 17 sw_other            choose another existing File ID
+/review_approve 17 sw_other 8,9,12     explicitly group multipart discovery IDs
+/review_batch 17,18,19                 approve safe proposed matches in a batch
+/review_reconsider 21                 return ignored/rejected item to the queue
+```
+
+Interactive buttons provide Approve Match, Reject Match, Ignore File,
+Search/Choose Another Website Entry, and Show Details. Repeated callback clicks are
+idempotent. Rejected and ignored discoveries remain recorded and are not suggested by
+later scans. Albums group by Telegram media-group ID only; separate archive parts group
+only when an administrator supplies their discovery IDs. Initial imports produce a
+summary and on-demand queue rather than one notification per historical message.
+
+Existing direct registration commands remain supported:
+
+```text
+/file_register File-ID 451 Display title
+/file_begin File-ID Display title
+# Forward source messages from Hyper Vault, then:
+/file_commit
+/file_update File-ID 500,501
+/file_link File-ID
+/file_test File-ID
+/file_disable File-ID
+/file_enable File-ID
+/files [query]
+```
+
+The Bot API identifies a forwarded supergroup but does not expose its original message
+ID, so Hyper Vault history should normally be registered through the importer. The
+guided workflow remains compatible with legacy channel origins. Explicit message IDs
+can also be used, but the visible copy test must succeed before saving.
+
+## Future uploads
+
+The normal polling process accepts messages only from `SOURCE_CHAT_ID`, identifies the
+forum thread, applies the same persistent filter/matcher, and queues review candidates.
+It cannot confuse private administrator messages or other groups with storage uploads.
+Exact, non-album matches may auto-register when `AUTO_APPROVE_EXACT_MATCHES=true`.
+Live albums stay in review until all Telegram updates arrive, preventing partial public
+resources. Keep only one polling process per bot token and SQLite database.
+
+Start the bot with:
+
+```bash
+python -m bot.main
+# or the compatible entry point:
+python app.py
+```
+
+## Website links and delivery
+
+An approved link has this form:
+
+```text
+https://t.me/HyperTeamITE_Bot?start=f_<secure-random-token>
+```
+
+The token maps privately to one active File ID, one source group, and ordered message
+IDs. The visitor must open it in a private chat. HyperBot validates the token and state,
+then copies exactly those messages. It announces success only after Telegram confirms
+all copies. Deleted messages, lost group access, protected content, API errors, and
+partial delivery receive generic safe errors without exposing storage metadata.
+
+Unavailable website resources can use the agreed fallback:
+
+```text
+https://t.me/HyperTeamITE_Bot?start=request
+```
+
+This enters the existing download-request conversation. Plain `/start`, menus, `/help`,
+and `/cancel` retain their existing behavior. Deep links used in a group never deliver.
+
+A credential-free JSON/CSV export remains available for deployments that need it:
 
 ```bash
 python scripts/export_links.py > telegram-links.json
 python scripts/export_links.py --format csv > telegram-links.csv
 ```
 
-The export command requires only `BOT_USERNAME` and `DATABASE_URL`; it does not need the
-bot token, source-channel ID, or administrator credentials. Rows are sorted by stable
-`website_id` for deterministic output. Inactive records are excluded unless
-`--include-inactive` is explicitly supplied.
-
-The generated artifact never contains the channel ID, Telegram message IDs, database
-primary keys, or credentials. Match the export's `website_id` to the website catalog's
-stable ID and render the supplied URL:
-
-```html
-<a href="https://t.me/HyperTeamITE_Bot?start=f_x7Kp93AbCdEfGhJkLmNpQrSt"
-   rel="noopener">تحميل عبر تيليغرام</a>
-```
-
-This standard `https://t.me/` link opens Telegram on desktop and mobile.
-
-### Complete example
-
-1. The website identifies “Python Basics” as `python-basics`.
-2. An administrator uploads the PDF to the private channel, where its message ID is
-   `451` (this number remains private).
-3. The administrator sends `/file_register python-basics 451 Python Basics PDF`.
-4. The database stores `python-basics`, a random token, the configured private channel,
-   and message `451`.
-5. The command returns a link such as
-   `https://t.me/HyperTeamITE_Bot?start=f_x7Kp93AbCdEfGhJkLmNpQrSt`.
-6. The website uses that URL. A click starts the bot, which resolves the token and calls
-   `copy_message` from the private channel to the user's chat.
-
-## Existing user and administrator flows
-
-- `/start` without a payload displays the Arabic main menu (or admin buttons for an
-  authorized administrator).
-- `/help` explains navigation and `/cancel` safely exits the current conversation.
-- Availability checks retain the existing HyperTeam Archive link.
-- Download requests are sent to `DOWNLOAD_REQUEST_CHAT_ID` with the chat ID needed for
-  a later completion notification.
-- Complaints contain only the complaint text—no name, username, user ID, chat ID, or
-  source message metadata.
-- Admin buttons send direct messages and completion notifications after authorization.
-- A deep-link `/start` works as a conversation fallback and immediately delivers its
-  one specific resource in private chat only. Group attempts never copy content.
-- Active conversation state takes precedence over menu text. `/start` and `/cancel`
-  remain available as conversation fallbacks.
-
 ## Tests
 
-The suite uses mocked Telegram interactions and temporary SQLite databases:
+External Telegram and Google calls are mocked; no real credentials are required:
 
 ```bash
-python -m unittest discover -v
-# Optional pytest runner:
+source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest
+pytest -q
+# standard-library runner also works:
+python -m unittest discover -v
 ```
 
-It covers normal and deep-link starts, private-chat enforcement, invalid/disabled
-tokens, distinct mappings, ordered and partial multi-message delivery,
-copy-not-forward behavior, restart persistence, collision prevention, safe exports,
-forwarded-message registration, administrator identity checks, unavailable source
-messages, and existing request/anonymous-complaint/admin-message workflows. The routing
-tests use the real `Application` and `ConversationHandler`, with only Telegram network
-methods mocked.
+Tests cover legacy flows, authorization, routing, private delivery, copy failures,
+normalization and matching, filtering, historical parsing, duplicate persistence,
+album/multipart registration, rejection/ignore/reconsideration, checkpoints, stable
+tokens, and `/start request`.
 
-## Deployment and operation
+## systemd deployment
 
-Run one polling process against the SQLite database on persistent storage. SQLite uses
-WAL mode. For a live backup, prefer SQLite's online backup command rather than copying
-only the main file, for example:
+Create `/etc/systemd/system/hyperbot.service` (adjust user and paths):
+
+```ini
+[Unit]
+Description=HyperBot Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyperbot
+Group=hyperbot
+WorkingDirectory=/opt/hyperbot
+EnvironmentFile=/opt/hyperbot/.env
+ExecStart=/opt/hyperbot/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=5
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then run:
 
 ```bash
-sqlite3 data/hyperbot.db ".backup '/secure/backups/hyperbot.db'"
+sudo systemctl daemon-reload
+sudo systemctl enable --now hyperbot
+sudo systemctl status hyperbot
+journalctl -u hyperbot -f
 ```
 
-Use a service manager such as systemd or a container restart policy, inject secrets
-through the environment, and restrict OS permissions on `.env`, backups, and the data
-directory. For multiple bot replicas or high write volume, implement the same repository
-interface with PostgreSQL before scaling out. The in-memory rate limiter and registration
-drafts are intentionally single-process; persistent file mappings remain in SQLite.
+Run historical imports manually from the virtual environment, not inside the bot
+polling service. This keeps large scans and interactive user authentication separate
+from visitor delivery.
 
-Logs intentionally record error categories rather than tokens, message text, user
-identities, source IDs, or stack traces sent to users. Telegram flood-control responses
-are retried once when the requested delay is at most 30 seconds. Other Telegram,
-network, deleted-message, access, and protected-content failures return a generic Arabic
-message without leaking internal metadata.
+## Backup and recovery
+
+SQLite uses WAL mode. Use an online backup, not a copy of only the main file:
+
+```bash
+mkdir -p /secure/backups
+sqlite3 data/hyperbot.db ".backup '/secure/backups/hyperbot-$(date +%F).db'"
+```
+
+Also back up `.env`, the Google key, and Telethon session separately in encrypted
+storage. Never place them in Git. To recover, stop the service, restore the database to
+the `DATABASE_URL` path, verify ownership/permissions, and restart. A restored public
+token continues to work because tokens and ordered mappings live in SQLite.
+
+If an import fails, rerun with `--resume`. If Sheets fails, fix credentials/sharing and
+run `python -m scripts.sync_catalog --sync`. If copying fails, verify bot membership,
+source-message existence, content protection, and `SOURCE_CHAT_ID`, then use
+`/file_test File-ID`. Disabling a resource preserves history and its token; deleting a
+record should be reserved for genuinely permanent removal.
 
 ## Telegram limitations
 
-- Bots cannot copy protected content or unsupported service-message types.
-- Bots cannot enumerate arbitrary historical channel messages through the Bot API.
-- Forward registration depends on Telegram providing a channel `forward_origin`; hidden,
-  protected, copied, or non-channel messages cannot be used in that workflow.
-- A deleted source post or removed channel access makes delivery unavailable.
-- Telegram imposes size, media, flood-control, and API-specific restrictions.
-- Sequential copying preserves configured order but Telegram ultimately controls client
-  rendering and album grouping.
-- If sequential delivery fails after some messages, the user is told the resource is
-  partial. Retrying can duplicate the messages already copied because the Bot API has no
-  atomic multi-message transaction with caption replacement.
-- SQLite is appropriate for a single process; use PostgreSQL for multi-replica writes.
+- The Bot API cannot enumerate arbitrary history; Telethon user authorization is
+  therefore required for historical scanning.
+- Bots cannot copy protected content or unsupported service messages.
+- Telegram has no atomic caption-stripping multi-copy operation. Default sequential
+  copies strip captions and may partially succeed; retained-caption albums use
+  `copy_messages` and validate the returned count.
+- Retrying a partial sequential delivery can duplicate already copied parts because the
+  Bot API has no delivery transaction.
+- SQLite is intended for one bot process. Use a server database before running multiple
+  replicas.
 
 ## Project layout
 
 ```text
-app.py                         compatibility entry point
-bot/
-  config.py                    validated environment configuration
-  main.py                      application composition
-  database/                    model and SQLite repository
-  handlers/                    start, legacy flows, and admin commands
-  keyboards/                   Arabic menus
-  middleware/                  user-ID administrator authorization
-  services/                    tokens, registry, delivery, and rate limiting
-  utils/                       logging setup
-scripts/export_links.py        safe website link export
-tests/                         automated regression tests
-.env.example                   secret-free configuration template
-requirements*.txt              runtime and test dependencies
+bot/config.py                       validated bot/import/catalog settings
+bot/database/                       registry plus versioned discovery/review schema
+bot/services/discovery.py           Telethon/Bot metadata parsing and filtering
+bot/services/matching.py            conservative catalog matching
+bot/services/pipeline.py            idempotent discovery persistence
+bot/services/historical_import.py   forum topics, pagination, FloodWait, checkpoints
+bot/services/google_sheets.py       stable IDs and range-precise Sheets updates
+bot/services/review.py              approval, grouping, registry, and sync
+bot/handlers/review.py              secured Telegram review workflow
+bot/handlers/storage.py             future Hyper Vault uploads
+scripts/import_group.py              historical import CLI
+scripts/sync_catalog.py              explicit ID initialization and sync CLI
+scripts/export_links.py              secret-free JSON/CSV export
+tests/                               mocked regression and integration tests
 ```

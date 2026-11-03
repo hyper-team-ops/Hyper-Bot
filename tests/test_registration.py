@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from telegram import Chat, MessageOriginChannel
+from telegram import Chat, MessageOriginChannel, MessageOriginChat
 from telegram.constants import ChatType
 
 from bot.config import Settings
@@ -82,6 +82,16 @@ class ForwardedRegistrationTests(unittest.IsolatedAsyncioTestCase):
             "ليست معاد توجيهها",
             self.message.reply_text.await_args.args[0],
         )
+
+    async def test_supergroup_forward_without_original_id_fails_safely(self):
+        self.context.args = ["group-source", "Group", "Source"]
+        await self.handlers["begin"](self.update, self.context)
+        self.message.forward_origin = MessageOriginChat(
+            date=datetime.now(UTC),
+            sender_chat=Chat(self.settings.source_channel_id, ChatType.SUPERGROUP),
+        )
+        await self.handlers["capture"](self.update, self.context)
+        self.assertIn("لا يرسل رقم الرسالة", self.message.reply_text.await_args.args[0])
 
     async def test_failed_copy_verification_is_not_persisted(self):
         self.context.args = ["unavailable", "Unavailable"]

@@ -52,6 +52,15 @@ def _integer_set(name: str, *, required: bool = True) -> frozenset[int]:
     return values
 
 
+def _boolean(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, str(default)).strip().casefold()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def _database_url() -> str:
     value = os.getenv("DATABASE_URL", "sqlite:///data/hyperbot.db").strip()
     if not value.startswith("sqlite:///"):
@@ -67,6 +76,8 @@ class CatalogSettings:
 
     bot_username: str
     database_url: str
+    google_sheet_id: str | None = None
+    google_application_credentials: str | None = None
 
     @classmethod
     def from_env(
@@ -76,6 +87,46 @@ class CatalogSettings:
         return cls(
             bot_username=_required("BOT_USERNAME").lstrip("@"),
             database_url=_database_url(),
+            google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip() or None,
+            google_application_credentials=os.getenv(
+                "GOOGLE_APPLICATION_CREDENTIALS", ""
+            ).strip() or None,
+        )
+
+    @property
+    def database_path(self) -> Path:
+        return Path(self.database_url.removeprefix("sqlite:///"))
+
+
+@dataclass(frozen=True, slots=True)
+class ImportSettings:
+    source_chat_id: int
+    telegram_api_id: int
+    telegram_api_hash: str
+    telethon_session_path: Path
+    database_url: str
+    google_sheet_id: str | None
+    google_application_credentials: str | None
+    bot_username: str
+    auto_approve_exact_matches: bool
+
+    @classmethod
+    def from_env(cls, *, dotenv_path: Path = Path(".env")) -> "ImportSettings":
+        _load_dotenv(dotenv_path)
+        source = os.getenv("SOURCE_CHAT_ID", os.getenv("SOURCE_CHANNEL_ID", "")).strip()
+        if not source:
+            raise ConfigurationError("SOURCE_CHAT_ID is required")
+        session = Path(os.getenv("TELETHON_SESSION_PATH", "data/telethon/hyper-vault"))
+        return cls(
+            source_chat_id=int(source), telegram_api_id=_integer("TELEGRAM_API_ID"),
+            telegram_api_hash=_required("TELEGRAM_API_HASH"),
+            telethon_session_path=session, database_url=_database_url(),
+            google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip() or None,
+            google_application_credentials=os.getenv(
+                "GOOGLE_APPLICATION_CREDENTIALS", ""
+            ).strip() or None,
+            bot_username=os.getenv("BOT_USERNAME", "HyperTeamITE_Bot").lstrip("@"),
+            auto_approve_exact_matches=_boolean("AUTO_APPROVE_EXACT_MATCHES"),
         )
 
     @property
@@ -95,6 +146,16 @@ class Settings:
     log_level: str
     rate_limit_requests: int
     rate_limit_window_seconds: int
+    telegram_api_id: int | None = None
+    telegram_api_hash: str | None = None
+    telethon_session_path: str = "data/telethon/hyper-vault"
+    google_sheet_id: str | None = None
+    google_application_credentials: str | None = None
+    included_topic_ids: frozenset[int] = frozenset()
+    excluded_topic_ids: frozenset[int] = frozenset()
+    auto_approve_exact_matches: bool = False
+    auto_sync_google_sheets: bool = True
+    min_file_size_bytes: int = 1
 
     @classmethod
     def from_env(cls, *, dotenv_path: Path = Path(".env")) -> "Settings":
@@ -108,10 +169,30 @@ class Settings:
             raise ConfigurationError("Rate-limit settings must be integers") from exc
         if requests < 1 or window < 1:
             raise ConfigurationError("Rate-limit settings must be positive")
+        source_raw = os.getenv("SOURCE_CHAT_ID", "").strip()
+        if not source_raw:
+            source_raw = os.getenv("SOURCE_CHANNEL_ID", "").strip()
+        if not source_raw:
+            raise ConfigurationError(
+                "Missing required environment variable: SOURCE_CHAT_ID "
+                "(SOURCE_CHANNEL_ID is accepted for compatibility)"
+            )
+        try:
+            source_chat_id = int(source_raw)
+            api_id = int(os.getenv("TELEGRAM_API_ID", "0")) or None
+            min_size = int(os.getenv("MIN_FILE_SIZE_BYTES", "1"))
+        except ValueError as exc:
+            raise ConfigurationError(
+                "SOURCE_CHAT_ID, TELEGRAM_API_ID, and MIN_FILE_SIZE_BYTES must be integers"
+            ) from exc
+        if source_chat_id >= 0:
+            raise ConfigurationError("SOURCE_CHAT_ID must be a negative group/chat ID")
+        if min_size < 0:
+            raise ConfigurationError("MIN_FILE_SIZE_BYTES cannot be negative")
         return cls(
             bot_token=_required("BOT_TOKEN"),
             bot_username=username,
-            source_channel_id=_integer("SOURCE_CHANNEL_ID"),
+            source_channel_id=source_chat_id,
             download_request_chat_id=_integer("DOWNLOAD_REQUEST_CHAT_ID"),
             complaint_recipient_chat_id=_integer("COMPLAINT_RECIPIENT_CHAT_ID"),
             admin_user_ids=_integer_set("ADMIN_USER_IDS"),
@@ -119,8 +200,27 @@ class Settings:
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             rate_limit_requests=requests,
             rate_limit_window_seconds=window,
+            telegram_api_id=api_id,
+            telegram_api_hash=os.getenv("TELEGRAM_API_HASH", "").strip() or None,
+            telethon_session_path=os.getenv(
+                "TELETHON_SESSION_PATH", "data/telethon/hyper-vault"
+            ).strip(),
+            google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip() or None,
+            google_application_credentials=os.getenv(
+                "GOOGLE_APPLICATION_CREDENTIALS", ""
+            ).strip() or None,
+            included_topic_ids=_integer_set("INCLUDED_TOPIC_IDS", required=False),
+            excluded_topic_ids=_integer_set("EXCLUDED_TOPIC_IDS", required=False),
+            auto_approve_exact_matches=_boolean("AUTO_APPROVE_EXACT_MATCHES"),
+            auto_sync_google_sheets=_boolean("AUTO_SYNC_GOOGLE_SHEETS", True),
+            min_file_size_bytes=min_size,
         )
 
     @property
     def database_path(self) -> Path:
         return Path(self.database_url.removeprefix("sqlite:///"))
+
+    @property
+    def source_chat_id(self) -> int:
+        """Forum supergroup ID; old code may still use source_channel_id."""
+        return self.source_channel_id

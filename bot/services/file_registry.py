@@ -21,9 +21,9 @@ def validate_message_ids(message_ids: Sequence[int]) -> tuple[int, ...]:
 
 
 class FileRegistry:
-    def __init__(self, repository: SQLiteFileRepository, source_channel_id: int) -> None:
+    def __init__(self, repository: SQLiteFileRepository, source_chat_id: int) -> None:
         self.repository = repository
-        self.source_channel_id = source_channel_id
+        self.source_chat_id = source_chat_id
 
     def register(self, website_id: str, title: str, message_ids: Sequence[int],
                  *, file_type: str | None = None, description: str | None = None,
@@ -35,7 +35,7 @@ class FileRegistry:
         ids = validate_message_ids(message_ids)
         return self.repository.create(
             website_id=website_id, title=title, public_token=generate_token(),
-            source_channel_id=self.source_channel_id, message_ids=ids,
+            source_channel_id=self.source_chat_id, message_ids=ids,
             file_type=file_type, description=description, strip_captions=strip_captions,
         )
 
@@ -43,5 +43,5 @@ class FileRegistry:
         return self.repository.update_messages(
             validate_website_id(website_id),
             validate_message_ids(message_ids),
-            self.source_channel_id,
+            self.source_chat_id,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import warnings
@@ -32,6 +33,8 @@ from bot.handlers.flows import (
     create_request_handler,
 )
 from bot.handlers.start import cancel_command, create_start_handler, help_command
+from bot.handlers.review import create_review_handlers
+from bot.handlers.storage import create_storage_handler
 from bot.keyboards.keyboards import (
     CHECK_AVAILABILITY,
     COMPLAINT,
@@ -40,6 +43,11 @@ from bot.keyboards.keyboards import (
 )
 from bot.services.file_delivery import FileDeliveryService
 from bot.services.file_registry import FileRegistry
+from bot.services.discovery import MessageFilter
+from bot.services.google_sheets import GoogleSheetsCatalog, SheetsError
+from bot.services.matching import FileMatcher
+from bot.services.pipeline import DiscoveryPipeline
+from bot.services.review import ReviewService
 from bot.services.rate_limit import RateLimiter
 from bot.services.registration_drafts import RegistrationDraftStore
 from bot.utils.logging import configure_logging
@@ -49,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 def build_application(settings: Settings) -> Application:
     repository = SQLiteFileRepository(settings.database_path)
-    registry = FileRegistry(repository, settings.source_channel_id)
+    registry = FileRegistry(repository, settings.source_chat_id)
     delivery = FileDeliveryService()
     limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window_seconds)
     drafts = RegistrationDraftStore()
@@ -57,9 +65,37 @@ def build_application(settings: Settings) -> Application:
     menu = create_menu_handler(settings)
     request = create_request_handler(settings)
     complaint = create_complaint_handler(settings)
-    admin = create_admin_handlers(
-        settings, repository, registry, delivery, drafts
+    sheets = None
+    catalog_entries = []
+    if settings.google_sheet_id:
+        sheets = GoogleSheetsCatalog(
+            settings.google_sheet_id, settings.google_application_credentials
+        )
+        try:
+            catalog_entries = sheets.load_entries()
+        except SheetsError:
+            logger.warning("Starting without Google catalog; synchronization can be retried")
+            sheets = None
+    pipeline = DiscoveryPipeline(
+        repository,
+        MessageFilter(
+            included_topic_ids=settings.included_topic_ids,
+            excluded_topic_ids=settings.excluded_topic_ids,
+            min_file_size_bytes=settings.min_file_size_bytes,
+        ),
+        FileMatcher(), catalog_entries,
     )
+    review_service = ReviewService(
+        repository, registry, catalog_entries, settings.bot_username,
+        sheets if settings.auto_sync_google_sheets else None,
+    )
+    async def sync_status(record, status: str) -> bool:
+        return await asyncio.to_thread(review_service.sync_status, record, status)
+
+    admin = create_admin_handlers(
+        settings, repository, registry, delivery, drafts, sync_status
+    )
+    reviews = create_review_handlers(settings, repository, review_service)
 
     application = Application.builder().token(settings.bot_token).build()
 
@@ -75,6 +111,24 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("file_begin", admin["begin"]), group=0)
     application.add_handler(CommandHandler("file_commit", admin["commit"]), group=0)
     application.add_handler(CommandHandler("file_abort", admin["abort"]), group=0)
+    application.add_handler(CommandHandler("reviews", reviews["list"]), group=0)
+    application.add_handler(CommandHandler("review_next", reviews["next"]), group=0)
+    application.add_handler(CommandHandler("review_search", reviews["search"]), group=0)
+    application.add_handler(CommandHandler("review_decided", reviews["decided"]), group=0)
+    application.add_handler(CommandHandler("review_approve", reviews["approve"]), group=0)
+    application.add_handler(CommandHandler("review_batch", reviews["batch"]), group=0)
+    application.add_handler(CommandHandler("review_reconsider", reviews["reconsider"]), group=0)
+    application.add_handler(
+        CallbackQueryHandler(reviews["callback"], pattern=r"^review:[arisd]:\d+$"),
+        group=0,
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Chat(chat_id=settings.source_chat_id),
+            create_storage_handler(settings, pipeline, review_service),
+        ),
+        group=0,
+    )
 
     menu_pattern = "^(?:" + "|".join(
         re.escape(choice)

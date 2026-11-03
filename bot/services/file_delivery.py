@@ -40,7 +40,7 @@ class FileDeliveryService:
         return await self.deliver_messages(
             bot=bot,
             chat_id=chat_id,
-            source_channel_id=record.source_channel_id,
+            source_channel_id=record.source_chat_id,
             message_ids=record.message_ids,
             strip_captions=record.strip_captions,
         )

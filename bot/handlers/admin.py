@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
-from telegram import MessageOriginChannel, Update
+from telegram import MessageOriginChannel, MessageOriginChat, Update
 from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.config import Settings
 from bot.database.repository import DuplicateFileError, FileNotFoundError, SQLiteFileRepository
+from bot.database.models import FileRecord
 from bot.handlers.flows import SEND_FINISH, SEND_MESSAGE
 from bot.middleware.authorization import is_admin, reject_unauthorized
 from bot.services.deep_links import build_deep_link, validate_website_id
@@ -34,7 +36,11 @@ def create_admin_handlers(
     registry: FileRegistry,
     delivery: FileDeliveryService,
     drafts: RegistrationDraftStore,
+    sync_status: Callable[[FileRecord, str], Awaitable[bool]] | None = None,
 ) -> dict[str, object]:
+    async def synchronize(record: FileRecord, status: str) -> None:
+        if sync_status is not None:
+            await sync_status(record, status)
     async def authorize(update: Update) -> bool:
         if is_admin(update, settings.admin_user_ids):
             return True
@@ -66,7 +72,7 @@ def create_admin_handlers(
             result = await delivery.deliver_messages(
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
-                source_channel_id=settings.source_channel_id,
+                source_channel_id=settings.source_chat_id,
                 message_ids=message_ids,
                 strip_captions=strip_captions,
             )
@@ -128,6 +134,7 @@ def create_admin_handlers(
         except (ValueError, DuplicateFileError) as exc:
             await update.effective_message.reply_text(f"تعذر التسجيل: {exc}")
             return
+        await synchronize(record, "available")
         await update.effective_message.reply_text(
             f"✅ تم تسجيل {record.website_id}\n"
             f"{build_deep_link(settings.bot_username, record.public_token)}"
@@ -173,10 +180,11 @@ def create_admin_handlers(
                 strip_captions=current.strip_captions,
             ):
                 return
-            registry.replace_messages(context.args[0], message_ids)
+            updated = registry.replace_messages(context.args[0], message_ids)
         except (ValueError, FileNotFoundError, DuplicateFileError) as exc:
             await update.effective_message.reply_text(f"تعذر التحديث: {exc}")
             return
+        await synchronize(updated, "available" if updated.active else "unavailable")
         await update.effective_message.reply_text("✅ تم تحديث رسائل الملف مع بقاء الرابط نفسه.")
 
     async def begin_forwarded_registration(
@@ -237,11 +245,21 @@ def create_admin_handlers(
             return
         origin = update.effective_message.forward_origin
         if (
-            not isinstance(origin, MessageOriginChannel)
-            or origin.chat.id != settings.source_channel_id
+            isinstance(origin, MessageOriginChat)
+            and origin.sender_chat.id == settings.source_chat_id
         ):
             await update.effective_message.reply_text(
-                "هذه الرسالة ليست معاد توجيهها من قناة التخزين المعتمدة."
+                "تعرف البوت على مجموعة التخزين، لكن Telegram لا يرسل رقم الرسالة "
+                "الأصلية عند إعادة التوجيه من مجموعة. استخدم المستورد التاريخي "
+                "أو /file_register مع رقم الرسالة."
+            )
+            return
+        if (
+            not isinstance(origin, MessageOriginChannel)
+            or origin.chat.id != settings.source_chat_id
+        ):
+            await update.effective_message.reply_text(
+                "هذه الرسالة ليست معاد توجيهها من مجموعة التخزين المعتمدة."
             )
             return
         try:
@@ -293,6 +311,7 @@ def create_admin_handlers(
             await update.effective_message.reply_text(f"تعذر التسجيل: {exc}")
             return
         drafts.finish(update.effective_user.id)
+        await synchronize(record, "available")
         await update.effective_message.reply_text(
             f"✅ تم التحقق والتسجيل\n"
             f"{build_deep_link(settings.bot_username, record.public_token)}"
@@ -333,10 +352,11 @@ def create_admin_handlers(
                     strip_captions=record.strip_captions,
                 ):
                     return
-            repository.set_active(context.args[0], active)
+            record = repository.set_active(context.args[0], active)
         except FileNotFoundError:
             await update.effective_message.reply_text("لم يتم العثور على الملف.")
             return
+        await synchronize(record, "available" if active else "unavailable")
         await update.effective_message.reply_text(
             "✅ تم تفعيل الملف." if active else "✅ تم تعطيل الملف."
         )
@@ -378,6 +398,10 @@ def create_admin_handlers(
             await update.effective_message.reply_text("الاستخدام: /file_delete website_id")
             return
         try:
+            record = repository.get_by_website_id(context.args[0])
+            if record is None:
+                raise FileNotFoundError(context.args[0])
+            await synchronize(record, "unavailable")
             repository.delete(context.args[0])
         except FileNotFoundError:
             await update.effective_message.reply_text("لم يتم العثور على الملف.")
