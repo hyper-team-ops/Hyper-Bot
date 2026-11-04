@@ -59,7 +59,9 @@ Python 3.11 or newer is recommended. Activate `.venv` again in each new shell.
    resources intended for delivery, or leave those resources unavailable.
 6. Obtain the numeric group ID (normally `-100...`) using a temporary diagnostic bot,
    Telegram API tool, or by inspecting an update while the bot is in the group. Set it
-   as `SOURCE_CHAT_ID`. Do not use a public `@username`.
+   as `SOURCE_CHAT_ID`. Do not use a public `@username` in place of the numeric ID.
+   If the group has a public username, also set `SOURCE_CHAT_USERNAME` so source links
+   can be validated during live Bot API discovery.
 
 Run the topic discovery command after configuring Telethon; it prints the authoritative
 numeric IDs and titles:
@@ -79,6 +81,7 @@ not used as access policy.
 | `BOT_TOKEN` | Newly rotated BotFather token |
 | `BOT_USERNAME` | Bot username, normally `HyperTeamITE_Bot` |
 | `SOURCE_CHAT_ID` | Numeric Hyper Vault supergroup ID |
+| `SOURCE_CHAT_USERNAME` | Optional public username used only to validate public source URLs |
 | `SOURCE_CHANNEL_ID` | Deprecated fallback accepted during migration |
 | `ADMIN_USER_IDS` | Comma-separated Telegram **user** IDs; checked on every command/callback |
 | `DOWNLOAD_REQUEST_CHAT_ID` | Destination for existing user download requests |
@@ -137,6 +140,8 @@ python -m scripts.sync_catalog --initialize-ids
 It fills only missing IDs for named rows, prefixes IDs by tab (`sw_` or `course_`), and
 never regenerates an existing ID. Row numbers are not identities. Review the sheet and
 back it up before this first write. Routine import never creates unknown public rows.
+Source-linked rows can appear as exact preview matches before IDs exist, but approval,
+registration, and website publication remain blocked until each row has a stable ID.
 
 To retry/synchronize all existing registry records:
 
@@ -159,7 +164,7 @@ python -m scripts.import_group --list-topics
 # Preview/filter/match without changing SQLite.
 python -m scripts.import_group --dry-run --exclude-topics 10,11 --limit 500
 
-# Preview one topic.
+# Preview one topic with one concise row per Telegram message and match reason.
 python -m scripts.import_group --preview --topic-id 123 --limit 100
 
 # Persist a complete scan of configured topics.
@@ -188,11 +193,14 @@ events, excluded topics, unsupported media, too-small files, duplicates, and pre
 decisions. Metadata includes filename, caption, size, MIME type, album ID, timestamp,
 and topic association; media bytes are never downloaded.
 
-Matching normalizes case, separators, CamelCase, versions, common installer noise, and
-selected product aliases. Size, extension, category, caption, and topic title provide
-secondary evidence. A unique high score is `exact`; competing or weak signals are
-`ambiguous`; absent reliable evidence is `unmatched`. Conservative automatic approval
-is off by default and never creates unknown catalog rows.
+Matching first validates exact public or private Telegram source URLs against the
+configured Hyper Vault identity and message/topic IDs. It next preserves an existing
+approved source-message/File-ID association. Only then does it compare case,
+separators, CamelCase, versions, installer noise, aliases, size, extension, category,
+caption, and topic title. Duplicate source links and competing metadata remain
+`ambiguous`; absent reliable evidence is `unmatched`. YouTube links are never treated
+as Telegram sources. Conservative automatic approval is off by default and never
+creates unknown catalog rows.
 
 ## Administrator review
 

@@ -7,7 +7,12 @@ from types import SimpleNamespace
 from bot.database.models import CatalogEntry, MatchStatus
 from bot.database.repository import SQLiteFileRepository
 from bot.services.discovery import MessageFilter, ResourceMetadata, parse_telethon_message
-from bot.services.matching import FileMatcher, normalize_filename
+from bot.services.matching import (
+    FileMatcher,
+    _size_bytes,
+    normalize_filename,
+    parse_telegram_source_url,
+)
 from bot.services.pipeline import DiscoveryPipeline
 
 
@@ -28,6 +33,10 @@ class DiscoveryAndMatchingTests(unittest.TestCase):
     def test_filename_normalization_handles_versions_aliases_and_case(self):
         self.assertEqual("adobe photoshop", normalize_filename("Photoshop_2025.ZIP"))
         self.assertEqual("visual studio code", normalize_filename("VSCodeUserSetup-x64.exe"))
+
+    def test_malformed_catalog_size_is_ignored_instead_of_crashing(self):
+        self.assertIsNone(_size_bytes("2..7 GB"))
+        self.assertEqual(2 * 1024**3, _size_bytes("2 GB"))
 
     def test_unique_strong_match_is_exact(self):
         result = FileMatcher().match(metadata(), [catalog()])
@@ -73,6 +82,79 @@ class DiscoveryAndMatchingTests(unittest.TestCase):
             self.assertFalse(pipeline.process(metadata()).duplicate)
             self.assertTrue(pipeline.process(metadata()).duplicate)
             self.assertEqual(1, len(repo.list_candidates()))
+
+    def test_direct_public_source_url_wins_over_filename_similarity(self):
+        linked = CatalogEntry(
+            None, "Chrome", "127 MB", "Browsers",
+            "https://t.me/Hyper_Vault/84/133", "softwares", 2,
+        )
+        misleading = catalog("wrong", "google chrome hyper team")
+        result = FileMatcher(
+            source_chat_id=-100123, source_username="Hyper_Vault"
+        ).match(
+            metadata(message_id=133, topic_id=84,
+                     filename="google-chrome-134.zip"),
+            [misleading, linked],
+        )
+        self.assertEqual(MatchStatus.EXACT, result.status)
+        self.assertIs(linked, result.entry)
+        self.assertIn("Telegram URL", result.reason)
+
+    def test_private_source_url_is_validated_against_configured_group(self):
+        valid = CatalogEntry(None, "Opera", None, None,
+                             "https://t.me/c/123/84/134", "softwares", 3)
+        wrong = CatalogEntry(None, "Opera", None, None,
+                             "https://t.me/c/999/84/134", "softwares", 4)
+        item = metadata(message_id=134, topic_id=84, filename="Opera.zip")
+        matcher = FileMatcher(source_chat_id=-100123)
+        self.assertIs(valid, matcher.match(item, [valid]).entry)
+        self.assertNotEqual("exact configured-source Telegram URL match",
+                            matcher.match(item, [wrong]).reason)
+
+    def test_duplicate_direct_source_links_require_review(self):
+        first = CatalogEntry("one", "Opera", None, None,
+                             "https://t.me/Hyper_Vault/84/134", "softwares", 3)
+        second = CatalogEntry("two", "Opera duplicate", None, None,
+                              "https://t.me/Hyper_Vault/84/134", "softwares", 30)
+        result = FileMatcher(
+            source_chat_id=-100123, source_username="Hyper_Vault"
+        ).match(metadata(message_id=134, topic_id=84), [first, second])
+        self.assertEqual(MatchStatus.AMBIGUOUS, result.status)
+        self.assertIn("duplicate catalog rows", result.reason)
+
+    def test_source_url_parser_rejects_youtube_deep_links_and_bad_parts(self):
+        self.assertEqual(
+            (84, 133),
+            (parse_telegram_source_url(
+                "https://t.me/Hyper_Vault/84/133"
+            ).topic_id,
+             parse_telegram_source_url(
+                 "https://t.me/Hyper_Vault/84/133"
+             ).message_id),
+        )
+        self.assertIsNone(parse_telegram_source_url("https://youtu.be/abc"))
+        self.assertIsNone(parse_telegram_source_url(
+            "https://t.me/HyperTeamITE_Bot?start=f_token"
+        ))
+        self.assertEqual(
+            133,
+            parse_telegram_source_url(
+                "https://t.me/Hyper_Vault/84/133?single"
+            ).message_id,
+        )
+
+    def test_existing_approved_source_mapping_precedes_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = SQLiteFileRepository(Path(directory) / "db.sqlite")
+            repo.create(website_id="stable", title="Stable", public_token="f_test",
+                        source_channel_id=-1001, message_ids=(10,))
+            stable = catalog("stable", "Unrelated stable title")
+            other = catalog("other", "Adobe Photoshop")
+            pipeline = DiscoveryPipeline(repo, MessageFilter(), FileMatcher(),
+                                         [other, stable])
+            result = pipeline.process(metadata(), dry_run=True)
+            self.assertEqual("stable", result.match.entry.file_id)
+            self.assertIn("existing approved", result.match.reason)
 
 
 if __name__ == "__main__":

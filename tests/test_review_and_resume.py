@@ -71,6 +71,22 @@ class ReviewAndResumeTests(unittest.TestCase):
         self.assertEqual(record.public_token, updated.public_token)
         self.assertEqual((501,), updated.message_ids)
 
+    def test_source_link_match_without_stable_file_id_cannot_be_approved(self):
+        item, _ = self.repo.add_discovered_message(
+            source_chat_id=-1001, message_id=601, topic_id=8,
+            topic_title="Courses", filename="course.zip", caption=None,
+            file_size=10, mime_type="application/zip", media_group_id=None,
+            message_date=datetime.now(UTC),
+        )
+        candidate = self.repo.add_match_candidate(
+            discovered_message_id=item.id, website_file_id=None,
+            website_title="Course without ID", confidence=1.0, status="exact",
+            reason="exact configured-source Telegram URL match",
+        )
+        with self.assertRaisesRegex(ValueError, "File ID"):
+            self.service.approve(candidate.id, 42)
+        self.assertEqual([], self.repo.list())
+
 
 if __name__ == "__main__":
     unittest.main()

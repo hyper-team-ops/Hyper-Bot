@@ -64,7 +64,9 @@ class DiscoveredMessage:
 
 @dataclass(frozen=True, slots=True)
 class CatalogEntry:
-    file_id: str
+    # A source-linked row may be discovered before the one-time File ID
+    # initialization.  Such a row is matchable for review, but not approvable.
+    file_id: str | None
     title: str
     size: str | None
     category: str | None

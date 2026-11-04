@@ -109,6 +109,7 @@ class ImportSettings:
     google_application_credentials: str | None
     bot_username: str
     auto_approve_exact_matches: bool
+    auto_sync_google_sheets: bool
 
     @classmethod
     def from_env(cls, *, dotenv_path: Path = Path(".env")) -> "ImportSettings":
@@ -127,6 +128,7 @@ class ImportSettings:
             ).strip() or None,
             bot_username=os.getenv("BOT_USERNAME", "HyperTeamITE_Bot").lstrip("@"),
             auto_approve_exact_matches=_boolean("AUTO_APPROVE_EXACT_MATCHES"),
+            auto_sync_google_sheets=_boolean("AUTO_SYNC_GOOGLE_SHEETS", True),
         )
 
     @property
@@ -156,6 +158,7 @@ class Settings:
     auto_approve_exact_matches: bool = False
     auto_sync_google_sheets: bool = True
     min_file_size_bytes: int = 1
+    source_chat_username: str | None = None
 
     @classmethod
     def from_env(cls, *, dotenv_path: Path = Path(".env")) -> "Settings":
@@ -214,6 +217,9 @@ class Settings:
             auto_approve_exact_matches=_boolean("AUTO_APPROVE_EXACT_MATCHES"),
             auto_sync_google_sheets=_boolean("AUTO_SYNC_GOOGLE_SHEETS", True),
             min_file_size_bytes=min_size,
+            source_chat_username=os.getenv(
+                "SOURCE_CHAT_USERNAME", ""
+            ).strip().lstrip("@") or None,
         )
 
     @property

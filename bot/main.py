@@ -83,7 +83,10 @@ def build_application(settings: Settings) -> Application:
             excluded_topic_ids=settings.excluded_topic_ids,
             min_file_size_bytes=settings.min_file_size_bytes,
         ),
-        FileMatcher(), catalog_entries,
+        FileMatcher(
+            source_chat_id=settings.source_chat_id,
+            source_username=settings.source_chat_username,
+        ), catalog_entries,
     )
     review_service = ReviewService(
         repository, registry, catalog_entries, settings.bot_username,

@@ -29,7 +29,17 @@ class DiscoveryPipeline:
 
     def process(self, item: ResourceMetadata, *, dry_run: bool = False) -> PipelineResult:
         decision = self.message_filter.evaluate(item)
-        match = self.matcher.match(item, self.catalog) if decision.accepted else None
+        approved = (
+            self.repository.get_by_source_message(item.source_chat_id, item.message_id)
+            if decision.accepted else None
+        )
+        match = (
+            self.matcher.match(
+                item, self.catalog,
+                stable_file_id=approved.website_id if approved else None,
+            )
+            if decision.accepted else None
+        )
         if dry_run:
             return PipelineResult(item, decision.accepted, False, match, decision.reason)
         discovered, created = self.repository.add_discovered_message(

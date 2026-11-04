@@ -25,7 +25,9 @@ class ReviewService:
     ) -> None:
         self.repository = repository
         self.registry = registry
-        self.catalog = {entry.file_id: entry for entry in catalog_entries}
+        self.catalog = {
+            entry.file_id: entry for entry in catalog_entries if entry.file_id
+        }
         self.bot_username = bot_username
         self.sheets = sheets
 

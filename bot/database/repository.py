@@ -299,6 +299,23 @@ class SQLiteFileRepository:
                 else None
             )
 
+    def get_by_source_message(
+        self, source_chat_id: int, message_id: int
+    ) -> FileRecord | None:
+        """Return the approved resource containing an exact source message."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT fr.* FROM file_records AS fr
+                JOIN file_messages AS fm ON fm.file_record_id = fr.id
+                WHERE fr.source_channel_id = ? AND fm.message_id = ?""",
+                (source_chat_id, message_id),
+            ).fetchone()
+            return (
+                self._record(row, self._messages(connection, row["id"]))
+                if row
+                else None
+            )
+
     def update_messages(
         self,
         website_id: str,

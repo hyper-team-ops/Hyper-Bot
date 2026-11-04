@@ -7,7 +7,7 @@ class Request:
     def __init__(self, result=None, error=None):
         self.result, self.error = result, error
 
-    def execute(self):
+    def execute(self, **kwargs):
         if self.error:
             raise self.error
         return self.result or {}
@@ -72,6 +72,37 @@ class GoogleSheetsTests(unittest.TestCase):
         catalog = GoogleSheetsCatalog("sheet", service=Service(ValuesAPI(self.sheet_data())))
         with self.assertRaises(ValueError):
             catalog.initialize_missing_file_ids()
+
+    def test_load_normalizes_headers_and_keeps_source_link_rows_without_ids(self):
+        headers = [" File Name ", "Size", "Category", "Source Type ",
+                   "Details "]
+        data = {
+            "softwares": [
+                headers,
+                ["Chrome", "127 MB", "Browsers",
+                 "https://t.me/Hyper_Vault/84/133", "browser"],
+                ["Course", "1 MB", "Courses", "https://youtu.be/example", "video"],
+            ],
+            "courses": [headers],
+        }
+        entries = GoogleSheetsCatalog(
+            "sheet", service=Service(ValuesAPI(data))
+        ).load_entries()
+        self.assertEqual(2, len(entries))
+        self.assertIsNone(entries[0].file_id)
+        self.assertEqual("https://t.me/Hyper_Vault/84/133",
+                         entries[0].source_type)
+
+    def test_existing_whitespace_variant_columns_are_not_duplicated(self):
+        headers = ["File Name", " File ID ", "Telegram Link ",
+                   " Telegram Status"]
+        values = ValuesAPI({"softwares": [headers, ["Editor", "", "", ""]],
+                            "courses": [headers]})
+        catalog = GoogleSheetsCatalog("sheet", service=Service(values))
+        self.assertEqual(1, catalog.initialize_missing_file_ids(approved=True))
+        self.assertEqual([], [body for body in values.batch_bodies
+                              if any(item.get("range", "").endswith("1:1")
+                                     for item in body.get("data", []))])
 
 
 if __name__ == "__main__":
