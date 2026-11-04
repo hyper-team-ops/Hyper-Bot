@@ -1,0 +1,17 @@
+{
+  "captured_at_utc": "2026-11-04T12:08:03Z",
+  "spreadsheet_id": "1usavkX9vZXRqvU08dGHnrAmv5l96LfReHfEyy3nC7sc",
+  "spreadsheet_title": "Hyper Directories",
+  "ranges": {
+    "softwares!A1:Z3": [
+      ["File Name", "Size", "Path", "Category", "Source Type", "Details "],
+      ["Chrome", "180MB", "After Format\\Browsers", "browsers", "https://t.me/Hyper_Vault/84/133"],
+      ["Opera", "51.9MB", "After Format\\Browsers", "browsers", "https://t.me/Hyper_Vault/84/134"]
+    ],
+    "courses!A1:Z2": [
+      ["File Name", "Size", "Path", "Category", "Source Type ", "Details "],
+      ["[Arabic - بالعربي] Repository Pattern With Unit Of Work in .Net 6 (Core)", "158 MB", "courses-ar\\back-end", "Back-end, .Net", "https://www.youtube.com/watch?v=VfH6hLsGM_Y&list=PL62tSREI9C-e6nQ47brLj00iSGddiee73", "تطبيق نمطي Repository وUnit of Work في مشروع .NET 6 لفصل طبقة البيانات عن منطق التطبيق وتنظيم عمليات قاعدة البيانات كمعاملة واحدة."]
+    ]
+  },
+  "restore_note": "Values-only safety snapshot of the exact header and sentinel rows read immediately before the Chrome-only integration write. Blank trailing cells G:Z were absent from the API response."
+}
